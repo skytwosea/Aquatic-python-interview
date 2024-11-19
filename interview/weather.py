@@ -10,25 +10,20 @@ class InputError(Exception):
 
 
 def process_csv(
-    reader: io.TextIOWrapper = sys.stdin,
-    writer: io.TextIOWrapper = sys.stdout,
+    reader: str | Path | io.TextIOWrapper = sys.stdin,
+    writer: str | Path | io.TextIOWrapper = sys.stdout,
+    *,
     target_col: str | None = None,  # default value set in-class to "Air Temperature",
 ):
-    """Entry point; initializes Weather class.
-
-    Default io is STDIN/STDOUT. Does not stream output.
-    """
     staged = Weather(reader, writer, target_col)
-    # staged.read()
-    staged.batch_process_input_stream(lines_per_batch=10000)
-    staged.write()
-    staged.deinit()
+    staged.run()
 
 
 class Weather:
     # input column labels:
     station_col = "Station Name"
     timestamp_col = "Measurement Timestamp"
+    timestamp_label_col = "Measurement Timestamp Label"
     id_col = "Measurement ID"
     airtemp_col = "Air Temperature"
 
@@ -46,30 +41,62 @@ class Weather:
         writer: io.TextIOWrapper,
         provided_target: str = None,
     ):
-        self._reader, self._writer = self._validate_data_source(reader, writer)
-        self._target_col: str = self._set_target_col(provided_target)
-        self._label_cols: list = self._set_labels()
+        self._reader, self._writer = self._validate_io(reader, writer)
         self._header_indexes_map: dict = self._set_header_index_map()
-        self._parser_pipe: callable = self._set_parser_pipe()
-        self._query_pipe: callable = self._set_query_pipe()
-        self._processed_dataframes: list = []
+        self._target_col: str = self.set_target_col(provided_target)
+        self._label_cols: list = self.set_labels()
+        self._schema_overrides_map: dict = self.set_schema_overrides()
+        self._parser_pipe: callable = self._process_time_columns
+        self._query_pipe: callable = self._query_min_max_first_last
+        self._batch_line_limit: int = 10000
+        self._processed_dataframes: list | str = []
 
-    def _validate_data_source(self, reader, writer) -> Path | None:
+    def _validate_io(self, reader, writer) -> tuple:
+        if not reader or not writer:
+            raise InputError(f"Error: missing io path(s).")
+        io_dict = {"reader": reader, "writer": writer}
+        for label, obj in io_dict.items():
+            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, str, Path]]):
+                raise InputError(
+                    f"Error: {label} type <{type(obj)}> is not permitted: must be of type [io.TextIOWrapper, str, Path"
+                )
+            if not isinstance(obj, io.TextIOWrapper):
+                obj = Path(obj).resolve()
+                if not obj.exists():
+                    raise InputError(f"Error: {label} path does not exist.")
+                if not obj.is_file():
+                    raise InputError(f"Error: {label} path is not a file.")
+                if not obj.suffix == ".csv":
+                    raise InputError(f"Error: {label} suffix is not a csv.")
         if not isinstance(reader, io.TextIOWrapper):
-            raise InputError("Error: reader is not recognized: require io.TextIOWrapper")
+            reader = Path(reader).resolve()
         if not isinstance(writer, io.TextIOWrapper):
-            raise InputError("Error: writer is not recognized: require io.TextIOWrapper")
+            writer = Path(writer).resolve()
         return (reader, writer)
 
-    def _set_target_col(self, provided_target: str) -> str:
-        return self.provided_target if provided_target else self.airtemp_col
+    def _set_header_index_map(self) -> dict:
+        if isinstance(self._reader, io.TextIOWrapper):
+            header_line = self._reader.readline()
+        elif isinstance(self._reader, str | Path):
+            with open(str(self._reader), "r") as f:
+                header_line = f.readline()
+        labels = header_line.strip().split(",")
+        return {c: i for i, c in enumerate(labels)}
 
-    def _set_labels(self) -> list:
-        match self._target_col:
-            case self.airtemp_col:
-                label = "Temp"
-            case _:
-                label = self._target_col
+    def set_target_col(self, target: str) -> str:
+        if not target:
+            target = self.airtemp_col
+        if target not in list(self._header_indexes_map.keys()):
+            raise InputError("Error: target column not in file header.")
+        return target if target else self.airtemp_col
+
+    def set_labels(self, label: str = None) -> list:
+        if not label:
+            match self._target_col:
+                case self.airtemp_col:
+                    label = "Temp"
+                case _:
+                    label = self._target_col.lower().replace(" ", "_")
         return [
             f"{prefix} {label}"
             for prefix in [
@@ -80,44 +107,91 @@ class Weather:
             ]
         ]
 
-    def _set_header_index_map(self) -> dict:
-        header_line = self._reader.readline()
-        labels = header_line.strip().split(',')
-        return {c:i for i,c in enumerate(labels)}
+    def set_schema_overrides(self, overrides: dict | None = None) -> dict:
+        if overrides:
+            return overrides
+        header_lst = list(self._header_indexes_map.keys())
+        string_subset = [
+            self.station_col,
+            self.timestamp_col,
+            self.id_col,
+            self.timestamp_label_col,
+        ]
+        return {
+            col: (pl.String if col in string_subset else pl.Float64)
+            for col in header_lst
+        }
 
-    def _set_parser_pipe(self, fn: callable=None) -> callable:
-        if not fn:
-            return self._process_time_columns
-        return fn
+    def set_parser_pipe(self, fn: callable = None) -> None:
+        self._parser_pipe = fn
 
-    def _set_query_pipe(self, fn: callable=None) -> callable:
-        if not fn:
-            return self._query_min_max_first_last
-        return fn
+    def set_query_pipe(self, fn: callable = None) -> None:
+        self._query_pipe = fn
 
-
-    def _bypass(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        """Utility method, used to isolate processing logic for testability."""
-        return lf
+    def set_batch_size(self, size) -> None:
+        self._batch_line_limit = size
 
     @staticmethod
-    def __breakpoint__() -> None:
+    def __bypass__(lf: pl.LazyFrame) -> pl.LazyFrame:
+        """Utility method, used to isolate processing logic for testing."""
+        return lf
+
+    def __breakpoint__(self) -> None:
         """Flush pipe and reconnect keyboard before dropping into pdb.
 
         https://stackoverflow.com/questions/9178751/use-pdb-set-trace-in-a-script-that-reads-stdin-via-a-pipe
         (it's an older code, sir, but it checks out)
         """
-        _ = sys.stdin.readlines()
-        sys.stdin=open("/dev/tty")
-        breakpoint()
+        if isinstance(self._reader, io.TextIOWrapper):
+            _ = self._reader.readlines()
+            sys.stdin = open("/dev/tty")
+            breakpoint()
+        else:
+            sys.stdin = open("/dev/tty")
+            breakpoint()
 
-    def read(self) -> None:
-        pass
+    def run(self):
+        self._read()
+        self._write()
+        self._deinit()
 
-    def batch_process_input_stream(
-        self,
-        lines_per_batch: int = 5000,
-    ) -> pl.DataFrame:
+    def _read(self) -> None:
+        if isinstance(self._reader, io.TextIOWrapper):
+            self._batch_process_input_stream()
+        else:
+            self._process_input_file()
+
+    def _write(self) -> None:
+        if isinstance(self._processed_dataframes, list):
+            df = pl.concat(self._processed_dataframes).sort(
+                self.date_col, self.station_col
+            )
+        elif isinstance(self._processed_dataframes, pl.DataFrame):
+            df = self._processed_dataframes
+        df.write_csv(file=self._writer)
+
+    def _deinit(self) -> None:
+        if isinstance(self._reader, io.TextIOWrapper):
+            self._reader.close()
+        if isinstance(self._writer, io.TextIOWrapper):
+            self._writer.close()
+
+    def _process_input_file(self) -> None:
+        self._processed_dataframes = (
+            pl.scan_csv(self._reader, schema_overrides=self._schema_overrides_map)
+            .select(
+                [
+                    self.station_col,
+                    self.timestamp_col,
+                    self.id_col,
+                    self._target_col,
+                ]
+            )
+            .pipe(self._parser_pipe)
+            .pipe(self._query_pipe)
+        ).collect()
+
+    def _batch_process_input_stream(self) -> None:
         """Extract target columns from io stream, and process through Polars.
 
         This function reads lines in serial, and extracts target columns into sink.
@@ -136,51 +210,65 @@ class Weather:
         done = False
         while not done:
             batch_limit_ctr = 0
-            while batch_limit_ctr < lines_per_batch:
+            while batch_limit_ctr < self._batch_line_limit:
                 if not (line := self._reader.readline()):
                     done = True
                     break
-                sink, day_tracker = self._input_stream_line_handler(line, sink, day_tracker)
+                sink, day_tracker = self._input_stream_line_handler(
+                    line, sink, day_tracker
+                )
                 batch_limit_ctr += 1
-            batch_df, sink, day_tracker = self._input_stream_dataframe_handler(done, sink, day_tracker)
+            batch_df, sink, day_tracker = self._input_stream_dataframe_handler(
+                done, sink, day_tracker
+            )
             self._processed_dataframes.append(
-                batch_df
-                .lazy()
-                .pipe(self._parser_pipe)
-                .pipe(self._query_pipe)
-                .collect()
+                batch_df.lazy().pipe(self._parser_pipe).pipe(self._query_pipe).collect()
             )
 
-    def _input_stream_line_handler(self, line: str, sink: dict, day_tracker: Counter) -> tuple:
-        line = line.strip().split(',')
-        for k,v in sink.items():
+    def _input_stream_line_handler(
+        self, line: str, sink: dict, day_tracker: Counter
+    ) -> tuple:
+        line = line.strip().split(",")
+        for k, v in sink.items():
             v.append(line[self._header_indexes_map[k]])
             if k == self.id_col:
                 day_tracker[line[self._header_indexes_map[self.id_col]][:-4]] += 1
         return (sink, day_tracker)
 
-    def _input_stream_dataframe_handler(self, done: bool, sink: dict, day_tracker: Counter) -> tuple:
+    def _input_stream_dataframe_handler(
+        self, done: bool, sink: dict, day_tracker: Counter
+    ) -> tuple:
         completed_days = [key for key, count in day_tracker.items() if count == 24]
         # use completed_days to get subset of sink that is complete:
         if done:
             # don't filter at EOF. Some measurement day spans in the dataset have only 23
             # measurements; let them through at the end:
-            batch_df = (
-                pl.DataFrame(sink, schema_overrides={self._target_col:pl.Float64,}, strict=False)
+            batch_df = pl.DataFrame(
+                sink,
+                schema_overrides={
+                    self._target_col: pl.Float64,
+                },
+                strict=False,
             )
         else:
             # not at EOF: filter for days that are guaranteed to be complete (24 measurements
             # in a day, at a station) so that incomplete ones can continue accummulating if necessary:
-            batch_df = (
-                pl.DataFrame(sink, schema_overrides={self._target_col:pl.Float64,}, strict=False)
-                .filter(pl.col(self.id_col).str.contains_any(completed_days))
-            )
+            batch_df = pl.DataFrame(
+                sink,
+                schema_overrides={
+                    self._target_col: pl.Float64,
+                },
+                strict=False,
+            ).filter(pl.col(self.id_col).str.contains_any(completed_days))
             sink = (
-                pl.DataFrame(sink, infer_schema_length=0)
-                .filter(~pl.col(self.id_col).str.contains_any(completed_days))
+                pl.DataFrame(sink, infer_schema_length=0).filter(
+                    ~pl.col(self.id_col).str.contains_any(completed_days)
+                )
             ).to_dict(as_series=False)
             # trim the counter:
-            day_tracker = Counter({key:count for key, count in day_tracker.items() if count < 24})
+            day_tracker = Counter(
+                {key: count for key, count in day_tracker.items() if count < 24}
+            )
         return (batch_df, sink, day_tracker)
 
     def _process_time_columns(self, df: pl.DataFrame) -> pl.LazyFrame:
@@ -197,8 +285,8 @@ class Weather:
                 .str.splitn(by=" ", n=2)
                 .struct.rename_fields(
                     [self.date_col, self.time12_col]
-                )  # keep time_12h for testing
-                .alias(self.timing_struct)  # temp name only; can be hardcoded
+                )  # keep time_12h for testing. Is dropped downstream.
+                .alias(self.timing_struct)
             )
             .unnest(self.timing_struct)
             .with_columns(
@@ -233,11 +321,3 @@ class Weather:
                 ),
             )
         )
-
-    def write(self):
-        df = pl.concat(self._processed_dataframes).sort(self.date_col, self.station_col)
-        df.write_csv(self._writer)
-
-    def deinit(self):
-        self._reader.close()
-        self._writer.close()
