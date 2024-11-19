@@ -5,6 +5,7 @@ from math import isclose
 from interview import weather
 import sys
 from collections import Counter
+import io
 
 dne_path = "/is/this/even/real.csv"
 exists_dir_path = "/home/vesper/Dropbox/dev/python_interview"
@@ -39,6 +40,40 @@ def test_io_bad_column_name():
     with pytest.raises(weather.InputError, match=r"column not in file"):
         _ = weather.Weather(test_reader_path, sys.stdout, "aardvaark")
     assert staged._target_col == "Air Temperature"
+
+def test_io_streaming_input():
+    with open(test_reader_path, 'r') as f:
+        # rawtext = '\n'.join(f.readlines()).strip()
+        rawtext = f.read()
+    reader = io.StringIO(rawtext)
+    writer = io.StringIO()
+    stream_obj = weather.Weather(reader, writer)
+    stream_obj._read()
+    stream_obj._write()
+    out = writer.getvalue()
+    stream_obj._deinit()
+    assert out == "Station Name,Date,Min Temp,Max Temp,First Temp,Last Temp\n63rd Street Weather Station,12/30/2016,-2.8,3.6,0.3,0.6\nFoster Weather Station,12/30/2016,-3.5,3.17,-0.39,0.06\nOak Street Weather Station,12/30/2016,-2.3,4.2,0.7,0.8\n63rd Street Weather Station,12/31/2016,-1.3,5.6,4.4,3.5\nFoster Weather Station,12/31/2016,-1.56,5.17,3.67,3.0\nOak Street Weather Station,12/31/2016,-0.3,6.3,4.9,4.1\n"
+
+def test_io_compare_stream_and_file_inputs():
+    # stream first:
+    with open(test_reader_path, 'r') as f:
+        rawtext = f.read()
+    sreader = io.StringIO(rawtext)
+    swriter = io.StringIO()
+    stream_obj = weather.Weather(sreader, swriter)
+    stream_obj._read()
+    stream_obj._write()
+    sout = swriter.getvalue()
+    stream_obj._deinit()
+    # file next:
+    freader = test_reader_path
+    fwriter = io.StringIO()
+    file_obj = weather.Weather(freader, fwriter)
+    file_obj._read()
+    file_obj._write()
+    fout = fwriter.getvalue()
+    file_obj._deinit()
+    assert sout == fout
 
 def test_init_state_label_cols():
     assert len(staged._label_cols) == 4

@@ -10,8 +10,8 @@ class InputError(Exception):
 
 
 def process_csv(
-    reader: str | Path | io.TextIOWrapper = sys.stdin,
-    writer: str | Path | io.TextIOWrapper = sys.stdout,
+    reader: io.TextIOWrapper | io.StringIO | Path | str = sys.stdin,
+    writer: io.TextIOWrapper | io.StringIO | Path | str = sys.stdout,
     *,
     target: str | None = None,  # default value set in-class to "Air Temperature",
 ):
@@ -37,8 +37,8 @@ class Weather:
 
     def __init__(
         self,
-        reader: io.TextIOWrapper,
-        writer: io.TextIOWrapper,
+        reader: io.TextIOWrapper | io.StringIO | Path | str,
+        writer: io.TextIOWrapper | io.StringIO | Path | str,
         target: str|None = None,
     ):
         self._reader, self._writer = self._validate_io(reader, writer)
@@ -56,11 +56,11 @@ class Weather:
             raise InputError(f"Error: missing io path(s).")
         io_dict = {"reader": reader, "writer": writer}
         for label, obj in io_dict.items():
-            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, str, Path]]):
+            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, io.StringIO, Path, str]]):
                 raise InputError(
-                    f"Error: {label} type <{type(obj)}> is not permitted: must be of type [io.TextIOWrapper, str, Path"
+                    f"Error: {label} type <{type(obj)}> is not permitted: must be of type [io.TextIOWrapper, io.StringIO, Path, str]"
                 )
-            if not isinstance(obj, io.TextIOWrapper):
+            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, io.StringIO]]):
                 obj = Path(obj).resolve()
                 if not obj.exists():
                     raise InputError(f"Error: {label} path does not exist.")
@@ -68,22 +68,24 @@ class Weather:
                     raise InputError(f"Error: {label} path is not a file.")
                 if not obj.suffix == ".csv":
                     raise InputError(f"Error: {label} suffix is not a csv.")
-        if not isinstance(reader, io.TextIOWrapper):
-            reader = Path(reader).resolve()
-        if not isinstance(writer, io.TextIOWrapper):
-            writer = Path(writer).resolve()
-        return (reader, writer)
+                io_dict[label] = obj
+        return (io_dict["reader"], io_dict["writer"])
 
     def _set_header_index_map(self) -> dict:
-        if isinstance(self._reader, io.TextIOWrapper):
+        if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
             header_line = self._reader.readline()
-        elif isinstance(self._reader, str | Path):
-            with open(str(self._reader), "r") as f:
+        elif any([isinstance(self._reader, T) for T in [str, Path]]):
+            with open(self._reader, "r") as f:
                 header_line = f.readline()
         labels = header_line.strip().split(",")
         return {c: i for i, c in enumerate(labels)}
 
     def set_target_col(self, target: str|None) -> str:
+        """Set the column on which to compute. Defaults to 'Air Temperature'.
+
+        param target must be a header label in the target document.
+        This parameter is case sensitive.
+        """
         if not target:
             target = self.airtemp_col
         if target not in list(self._header_indexes_map.keys()):
@@ -91,12 +93,17 @@ class Weather:
         return target
 
     def set_labels(self, label: str = None) -> list:
+        """Set the output column label tag.
+
+        param label can be any valid string.
+        The label will be prefixed with {Min, Max, First, Last}.
+        """
         if not label:
             match self._target_col:
                 case self.airtemp_col:
                     label = "Temp"
                 case _:
-                    label = self._target_col.lower().replace(" ", "_")
+                    label = self._target_col
         return [
             f"{prefix} {label}"
             for prefix in [
@@ -108,6 +115,12 @@ class Weather:
         ]
 
     def set_schema_overrides(self, overrides: dict | None = None) -> dict:
+        """Set Polars schema overrides.
+
+        param overrides must be a dict as so: {column_label:pl.<T>}
+        where column_label is a string and pl.<T> is a valid Polars data type.
+        Valid only when reading from file.
+        """
         if overrides:
             return overrides
         header_lst = list(self._header_indexes_map.keys())
@@ -123,12 +136,23 @@ class Weather:
         }
 
     def set_parser_pipe(self, fn: callable = None) -> None:
+        """Set the pre-query processing function.
+
+        Function must return a pl.LazyFrame that adheres to the constraints of
+        the input dataframe, and to the constraints of the query function.
+        """
         self._parser_pipe = fn
 
     def set_query_pipe(self, fn: callable = None) -> None:
+        """Set the query processing function.
+
+        Function must return a pl.LazyFrame that adheres to the constraints of
+        the input dataframe.
+        """
         self._query_pipe = fn
 
     def set_batch_size(self, size) -> None:
+        """Set the line limit for batches in streaming mode. Defaults to 10000"""
         self._batch_line_limit = size
 
     @staticmethod
@@ -137,12 +161,12 @@ class Weather:
         return lf
 
     def __breakpoint__(self) -> None:
-        """Flush pipe and reconnect keyboard before dropping into pdb.
+        """Flush pipe and reconnect tty before dropping into pdb.
 
         https://stackoverflow.com/questions/9178751/use-pdb-set-trace-in-a-script-that-reads-stdin-via-a-pipe
         (it's an older code, sir, but it checks out)
         """
-        if isinstance(self._reader, io.TextIOWrapper):
+        if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
             _ = self._reader.readlines()
             sys.stdin = open("/dev/tty")
             breakpoint()
@@ -156,7 +180,7 @@ class Weather:
         self._deinit()
 
     def _read(self) -> None:
-        if isinstance(self._reader, io.TextIOWrapper):
+        if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
             self._batch_process_input_stream()
         else:
             self._process_input_file()
@@ -167,18 +191,28 @@ class Weather:
                 self.date_col, self.station_col
             )
         elif isinstance(self._processed_dataframes, pl.DataFrame):
-            df = self._processed_dataframes
+            df = self._processed_dataframes.sort(
+                self.date_col, self.station_col
+            )
         df.write_csv(file=self._writer)
 
     def _deinit(self) -> None:
         # don't close when reading from file; Polars uses an
         # internal context manager
-        if isinstance(self._reader, io.TextIOWrapper):
+        if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
             self._reader.close()
-        if isinstance(self._writer, io.TextIOWrapper):
+        if any([isinstance(self._writer, T) for T in [io.TextIOWrapper, io.StringIO]]):
             self._writer.close()
 
     def _process_input_file(self) -> None:
+        """Extract target columns from file, and process through Polars.
+
+        From Polars documentation:
+        > Lazily read from a CSV file or multiple files via glob patterns.
+          This allows the query optimizer to push down predicates and projections to
+          the scan level, thereby potentially reducing memory overhead.
+        https://docs.pola.rs/api/python/dev/reference/api/polars.scan_csv.html
+        """
         self._processed_dataframes = (
             pl.scan_csv(self._reader, schema_overrides=self._schema_overrides_map)
             .select(
