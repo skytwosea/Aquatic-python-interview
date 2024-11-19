@@ -13,9 +13,9 @@ def process_csv(
     reader: str | Path | io.TextIOWrapper = sys.stdin,
     writer: str | Path | io.TextIOWrapper = sys.stdout,
     *,
-    target_col: str | None = None,  # default value set in-class to "Air Temperature",
+    target: str | None = None,  # default value set in-class to "Air Temperature",
 ):
-    staged = Weather(reader, writer, target_col)
+    staged = Weather(reader, writer, target)
     staged.run()
 
 
@@ -39,11 +39,11 @@ class Weather:
         self,
         reader: io.TextIOWrapper,
         writer: io.TextIOWrapper,
-        provided_target: str = None,
+        target: str|None = None,
     ):
         self._reader, self._writer = self._validate_io(reader, writer)
         self._header_indexes_map: dict = self._set_header_index_map()
-        self._target_col: str = self.set_target_col(provided_target)
+        self._target_col: str = self.set_target_col(target)
         self._label_cols: list = self.set_labels()
         self._schema_overrides_map: dict = self.set_schema_overrides()
         self._parser_pipe: callable = self._process_time_columns
@@ -83,12 +83,12 @@ class Weather:
         labels = header_line.strip().split(",")
         return {c: i for i, c in enumerate(labels)}
 
-    def set_target_col(self, target: str) -> str:
+    def set_target_col(self, target: str|None) -> str:
         if not target:
             target = self.airtemp_col
         if target not in list(self._header_indexes_map.keys()):
             raise InputError("Error: target column not in file header.")
-        return target if target else self.airtemp_col
+        return target
 
     def set_labels(self, label: str = None) -> list:
         if not label:
@@ -171,6 +171,8 @@ class Weather:
         df.write_csv(file=self._writer)
 
     def _deinit(self) -> None:
+        # don't close when reading from file; Polars uses an
+        # internal context manager
         if isinstance(self._reader, io.TextIOWrapper):
             self._reader.close()
         if isinstance(self._writer, io.TextIOWrapper):
