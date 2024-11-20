@@ -209,10 +209,10 @@ class Weather:
         """Preflight check. This allows the class to be initialized without a reader or writer."""
         if any([attr is None for attr in self.__dict__.values()]):
             padding = max([len(key) for key in self.__dict__.keys()])
-            undefined_attrs = [f"  {attr:<{padding}}: {val}" for attr, val in self.__dict__.items()]
+            undefined_attrs = '\n'.join([f"  {attr:<{padding}}: {val}" for attr, val in self.__dict__.items()])
             raise InitError(
                 "undefined attributes:\n"
-                f"{'\n'.join(undefined_attrs)}\n"
+                f"{undefined_attrs}\n"
                 "If scripting or running in repl, either initialize the Weather class\n"
                 "with a valid reader and writer, or use the appropriate setter methods.\n"
                 "Note: the _set_reader() method will also set the _header_index_map\n"

@@ -102,9 +102,6 @@ def test_input_read_from_file():
     assert len(staged._processed_dataframes.columns) == 4
     assert all([colname in expected_colnames for colname in staged._processed_dataframes.columns])
 
-def test_input_batched_stream_handler():
-    pass
-
 def test_processing_iostream_line_handler():
     with open(test_reader_path, 'r') as trp:
         _ = trp.readline()
