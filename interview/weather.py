@@ -8,6 +8,9 @@ from collections import Counter
 class InputError(Exception):
     pass
 
+class InitError(Exception):
+    pass
+
 
 def process_csv(
     reader: io.TextIOWrapper | io.StringIO | Path | str = sys.stdin,
@@ -28,50 +31,61 @@ class Weather:
     airtemp_col = "Air Temperature"
 
     # output column labels:
-    date_col = "Date"
+    _date_col = "Date"
 
     # processing column labels:
-    time12_col = "time_12h"
-    time24_col = "time_24h"
-    timing_struct = "timing_struct"
+    _time12_col = "time_12h"
+    _time24_col = "time_24h"
+    _timing_struct = "time_struct"
 
     def __init__(
         self,
-        reader: io.TextIOWrapper | io.StringIO | Path | str,
-        writer: io.TextIOWrapper | io.StringIO | Path | str,
+        reader: io.TextIOWrapper | io.StringIO | Path | str | None = None,
+        writer: io.TextIOWrapper | io.StringIO | Path | str | None = None,
         target: str|None = None,
     ):
         self._reader, self._writer = self._validate_io(reader, writer)
-        self._header_indexes_map: dict = self._set_header_index_map()
+        self._header_index_map: dict | None = self._set_header_index_map()
         self._target_col: str = self.set_target_col(target)
         self._label_cols: list = self.set_labels()
-        self._schema_overrides_map: dict = self.set_schema_overrides()
+        self._schema_overrides_map: dict | None = self.set_schema_overrides()
         self._parser_pipe: callable = self._process_time_columns
         self._query_pipe: callable = self._query_min_max_first_last
         self._batch_line_limit: int = 10000
         self._processed_dataframes: list | str = []
 
     def _validate_io(self, reader, writer) -> tuple:
-        if not reader or not writer:
-            raise InputError(f"Error: missing io path(s).")
         io_dict = {"reader": reader, "writer": writer}
         for label, obj in io_dict.items():
-            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, io.StringIO, Path, str]]):
+            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, io.StringIO, Path, str, type(None)]]):
                 raise InputError(
-                    f"Error: {label} type <{type(obj)}> is not permitted: must be of type [io.TextIOWrapper, io.StringIO, Path, str]"
+                    f"{label} type <{type(obj)}> is not permitted:\n"
+                    "must be of type [io.TextIOWrapper, io.StringIO, Path, str]"
                 )
-            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, io.StringIO]]):
+            if not any([isinstance(obj, T) for T in [io.TextIOWrapper, io.StringIO, type(None)]]):
                 obj = Path(obj).resolve()
                 if not obj.exists():
-                    raise InputError(f"Error: {label} path does not exist.")
+                    raise InputError(f"{label} path does not exist.")
                 if not obj.is_file():
-                    raise InputError(f"Error: {label} path is not a file.")
+                    raise InputError(f"{label} path is not a file.")
                 if not obj.suffix == ".csv":
-                    raise InputError(f"Error: {label} suffix is not a csv.")
+                    raise InputError(f"{label} suffix is not a csv.")
                 io_dict[label] = obj
         return (io_dict["reader"], io_dict["writer"])
 
+    def set_reader(self, reader: io.TextIOWrapper | io.StringIO | Path | str) -> None:
+        self._reader = reader
+        self._validate_io()
+        self._set_header_index_map()
+        self.set_schema_overrides()
+
+    def set_writer(self, writer: io.TextIOWrapper | io.StringIO | Path | str) -> None:
+        self._validate_io()
+        self._writer = writer
+
     def _set_header_index_map(self) -> dict:
+        if not self._reader:
+            return None
         if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
             header_line = self._reader.readline()
         elif any([isinstance(self._reader, T) for T in [str, Path]]):
@@ -88,8 +102,8 @@ class Weather:
         """
         if not target:
             target = self.airtemp_col
-        if target not in list(self._header_indexes_map.keys()):
-            raise InputError("Error: target column not in file header.")
+        if self._header_index_map and target not in list(self._header_index_map.keys()):
+            raise InputError("target column not in file header.")
         return target
 
     def set_labels(self, label: str = None) -> list:
@@ -102,6 +116,7 @@ class Weather:
             match self._target_col:
                 case self.airtemp_col:
                     label = "Temp"
+                # add more here
                 case _:
                     label = self._target_col
         return [
@@ -114,7 +129,7 @@ class Weather:
             ]
         ]
 
-    def set_schema_overrides(self, overrides: dict | None = None) -> dict:
+    def set_schema_overrides(self, overrides: dict | None = None) -> dict | None:
         """Set Polars schema overrides.
 
         param overrides must be a dict as so: {column_label:pl.<T>}
@@ -123,7 +138,9 @@ class Weather:
         """
         if overrides:
             return overrides
-        header_lst = list(self._header_indexes_map.keys())
+        if not self._header_index_map:
+            return None
+        header_lst = list(self._header_index_map.keys())
         string_subset = [
             self.station_col,
             self.timestamp_col,
@@ -151,16 +168,16 @@ class Weather:
         """
         self._query_pipe = fn
 
-    def set_batch_size(self, size) -> None:
+    def set_batch_size(self, size: int) -> None:
         """Set the line limit for batches in streaming mode. Defaults to 10000"""
         self._batch_line_limit = size
 
     @staticmethod
-    def __bypass__(lf: pl.LazyFrame) -> pl.LazyFrame:
+    def _bypass(lf: pl.LazyFrame) -> pl.LazyFrame:
         """Utility method, used to isolate processing logic for testing."""
         return lf
 
-    def __breakpoint__(self) -> None:
+    def _breakpoint(self) -> None:
         """Flush pipe and reconnect tty before dropping into pdb.
 
         https://stackoverflow.com/questions/9178751/use-pdb-set-trace-in-a-script-that-reads-stdin-via-a-pipe
@@ -174,10 +191,33 @@ class Weather:
             sys.stdin = open("/dev/tty")
             breakpoint()
 
-    def run(self):
+    def run(self) -> None:
+        """User utility function. Call run() to initiate input processing.
+
+        run() marshalls four methods:
+          _ensure() : preflight check that attributes are set.
+          _read()   : delegate appropriate processing function.
+          _write()  : collect resulting dataframes and write to file.
+          _close()  : close reader and writer objects.
+        """
+        self._ensure()
         self._read()
         self._write()
-        self._deinit()
+        self._close()
+
+    def _ensure(self):
+        """Preflight check. This allows the class to be initialized without a reader or writer."""
+        if any([attr is None for attr in self.__dict__.values()]):
+            padding = max([len(key) for key in self.__dict__.keys()])
+            undefined_attrs = [f"  {attr:<{padding}}: {val}" for attr, val in self.__dict__.items()]
+            raise InitError(
+                "undefined attributes:\n"
+                f"{'\n'.join(undefined_attrs)}\n"
+                "If scripting or running in repl, either initialize the Weather class\n"
+                "with a valid reader and writer, or use the appropriate setter methods.\n"
+                "Note: the _set_reader() method will also set the _header_index_map\n"
+                "and _schema_overrides_map."
+            )
 
     def _read(self) -> None:
         if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
@@ -188,17 +228,16 @@ class Weather:
     def _write(self) -> None:
         if isinstance(self._processed_dataframes, list):
             df = pl.concat(self._processed_dataframes).sort(
-                self.date_col, self.station_col
+                self._date_col, self.station_col
             )
         elif isinstance(self._processed_dataframes, pl.DataFrame):
             df = self._processed_dataframes.sort(
-                self.date_col, self.station_col
+                self._date_col, self.station_col
             )
         df.write_csv(file=self._writer)
 
-    def _deinit(self) -> None:
-        # don't close when reading from file; Polars uses an
-        # internal context manager
+    def _close(self) -> None:
+        # don't close when reading from file; Polars uses an internal context manager
         if any([isinstance(self._reader, T) for T in [io.TextIOWrapper, io.StringIO]]):
             self._reader.close()
         if any([isinstance(self._writer, T) for T in [io.TextIOWrapper, io.StringIO]]):
@@ -266,9 +305,9 @@ class Weather:
     ) -> tuple:
         line = line.strip().split(",")
         for k, v in sink.items():
-            v.append(line[self._header_indexes_map[k]])
+            v.append(line[self._header_index_map[k]])
             if k == self.id_col:
-                day_tracker[line[self._header_indexes_map[self.id_col]][:-4]] += 1
+                day_tracker[line[self._header_index_map[self.id_col]][:-4]] += 1
         return (sink, day_tracker)
 
     def _input_stream_dataframe_handler(
@@ -320,13 +359,13 @@ class Weather:
                 pl.col(self.timestamp_col)
                 .str.splitn(by=" ", n=2)
                 .struct.rename_fields(
-                    [self.date_col, self.time12_col]
+                    [self._date_col, self._time12_col]
                 )  # keep time_12h for testing. Is dropped downstream.
-                .alias(self.timing_struct)
+                .alias(self._timing_struct)
             )
-            .unnest(self.timing_struct)
+            .unnest(self._timing_struct)
             .with_columns(
-                pl.col(self.id_col).str.tail(n=4).cast(pl.Int64).alias(self.time24_col)
+                pl.col(self.id_col).str.tail(n=4).cast(pl.Int64).alias(self._time24_col)
             )
             .drop(self.timestamp_col, self.id_col)
         )
@@ -339,19 +378,19 @@ class Weather:
         """
         return (
             df.lazy()
-            .group_by(self.station_col, self.date_col)
+            .group_by(self.station_col, self._date_col)
             .agg(
                 pl.min(self._target_col).alias(self._label_cols[0]),
                 pl.max(self._target_col).alias(self._label_cols[1]),
                 (
                     pl.col(self._target_col)
-                    .filter(pl.col(self.time24_col) == pl.min(self.time24_col))
+                    .filter(pl.col(self._time24_col) == pl.min(self._time24_col))
                     .first()
                     .alias(self._label_cols[2])
                 ),
                 (
                     pl.col(self._target_col)
-                    .filter(pl.col(self.time24_col) == pl.max(self.time24_col))
+                    .filter(pl.col(self._time24_col) == pl.max(self._time24_col))
                     .first()
                     .alias(self._label_cols[3])
                 ),

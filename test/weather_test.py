@@ -15,8 +15,6 @@ staged = weather.Weather(test_reader_path, sys.stdout)
 
 
 def test_io_in_good_and_bad_paths(tmp_path):
-    with pytest.raises(TypeError, match=r"missing 2 required"):
-        _ = weather.Weather()
     with pytest.raises(weather.InputError, match=r"does not exist"):
         _ = weather.Weather(dne_path, tmp_path/"out")
     with pytest.raises(weather.InputError, match=r"not a file"):
@@ -26,8 +24,6 @@ def test_io_in_good_and_bad_paths(tmp_path):
     assert staged._reader == Path(test_reader_path).resolve()
 
 def test_io_out_good_and_bad_paths(tmp_path):
-    with pytest.raises(TypeError, match=r"missing 2 required"):
-        _ = weather.Weather()
     with pytest.raises(weather.InputError, match=r"does not exist"):
         _ = weather.Weather(test_reader_path, dne_path)
     with pytest.raises(weather.InputError, match=r"not a file"):
@@ -36,6 +32,11 @@ def test_io_out_good_and_bad_paths(tmp_path):
         _ = weather.Weather(test_reader_path, exists_invalid_path)
     assert staged._writer == sys.stdout
 
+def test_io_dont_run_without_source_or_dest():
+    obj = weather.Weather()
+    with pytest.raises(weather.InitError, match=r"undefined attributes"):
+        obj.run()
+
 def test_io_bad_column_name():
     with pytest.raises(weather.InputError, match=r"column not in file"):
         _ = weather.Weather(test_reader_path, sys.stdout, "aardvaark")
@@ -43,7 +44,6 @@ def test_io_bad_column_name():
 
 def test_io_streaming_input():
     with open(test_reader_path, 'r') as f:
-        # rawtext = '\n'.join(f.readlines()).strip()
         rawtext = f.read()
     reader = io.StringIO(rawtext)
     writer = io.StringIO()
@@ -51,7 +51,7 @@ def test_io_streaming_input():
     stream_obj._read()
     stream_obj._write()
     out = writer.getvalue()
-    stream_obj._deinit()
+    stream_obj._close()
     assert out == "Station Name,Date,Min Temp,Max Temp,First Temp,Last Temp\n63rd Street Weather Station,12/30/2016,-2.8,3.6,0.3,0.6\nFoster Weather Station,12/30/2016,-3.5,3.17,-0.39,0.06\nOak Street Weather Station,12/30/2016,-2.3,4.2,0.7,0.8\n63rd Street Weather Station,12/31/2016,-1.3,5.6,4.4,3.5\nFoster Weather Station,12/31/2016,-1.56,5.17,3.67,3.0\nOak Street Weather Station,12/31/2016,-0.3,6.3,4.9,4.1\n"
 
 def test_io_compare_stream_and_file_inputs():
@@ -64,7 +64,7 @@ def test_io_compare_stream_and_file_inputs():
     stream_obj._read()
     stream_obj._write()
     sout = swriter.getvalue()
-    stream_obj._deinit()
+    stream_obj._close()
     # file next:
     freader = test_reader_path
     fwriter = io.StringIO()
@@ -72,17 +72,18 @@ def test_io_compare_stream_and_file_inputs():
     file_obj._read()
     file_obj._write()
     fout = fwriter.getvalue()
-    file_obj._deinit()
+    file_obj._close()
+    # compare:
     assert sout == fout
 
 def test_init_state_label_cols():
     assert len(staged._label_cols) == 4
     assert staged._label_cols[0] == "Min Temp"
 
-def test_init_state_header_indexes_map():
-    assert len(list(staged._header_indexes_map.keys())) == 18
-    assert staged._header_indexes_map["Station Name"] == 0
-    assert staged._header_indexes_map["Measurement ID"] == 17
+def test_init_state_header_index_map():
+    assert len(list(staged._header_index_map.keys())) == 18
+    assert staged._header_index_map["Station Name"] == 0
+    assert staged._header_index_map["Measurement ID"] == 17
 
 def test_init_state_schema_overrides_map():
     assert len(list(staged._schema_overrides_map.keys())) == 18
@@ -94,8 +95,8 @@ def test_init_state_batch_limit():
 
 def test_input_read_from_file():
     expected_colnames = ["Station Name", "Measurement Timestamp", "Measurement ID", staged._target_col]
-    staged.set_parser_pipe(staged.__bypass__)
-    staged.set_query_pipe(staged.__bypass__)
+    staged.set_parser_pipe(staged._bypass)
+    staged.set_query_pipe(staged._bypass)
     _ = staged._process_input_file()
     assert isinstance(staged._processed_dataframes, pl.DataFrame)
     assert len(staged._processed_dataframes.columns) == 4
@@ -123,10 +124,6 @@ def test_processing_iostream_line_handler():
     assert sink["Air Temperature"] == ["-1.3",]
 
 def test_processing_isolated_parse_datetime_columns():
-    # self.id_col = "Measurement ID"
-    # self.timestamp_col = "Measurement Timestamp"
-    # self.time12_col = "time_12h"
-    # self.time24_col = "time_24h"
     tdf = pl.DataFrame(
         {
             "Measurement ID": ["00001111", "00002222", "00003333", "00004444",],
@@ -157,7 +154,7 @@ def test_processing_workflow_parse_datetime_columns():
     expected_colnames = ["Station Name", "Date", "time_12h", "time_24h", staged._target_col]
 
     staged.set_parser_pipe(staged._process_time_columns)  # 
-    staged.set_query_pipe(staged.__bypass__)
+    staged.set_query_pipe(staged._bypass)
     _ = staged._process_input_file()
 
     assert len(staged._processed_dataframes.columns) == 5
